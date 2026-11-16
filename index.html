@@ -1,634 +1,197 @@
 <!DOCTYPE html>
-<html lang="en">
+<html>
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-
 <title>Projector Profilometry</title>
 
+<script async src="https://docs.opencv.org/4.x/opencv.js"></script>
+
 <style>
-
-body{
-    margin:0;
-    overflow:hidden;
-    background:black;
-    font-family:Arial,sans-serif;
-}
-
-#ui{
-    position:absolute;
-    top:10px;
-    left:10px;
-    z-index:100;
-    background:rgba(0,0,0,0.6);
-    padding:10px;
-    border-radius:8px;
-}
-
-button{
-    padding:8px 12px;
-    margin-right:6px;
-}
-
-#videoPanel{
-    position:absolute;
-    right:10px;
-    bottom:10px;
-    width:320px;
-    height:240px;
-    z-index:100;
-    border:2px solid white;
-}
-
-#video{
-    position:absolute;
-    width:100%;
-    height:100%;
-    object-fit:cover;
-}
-
-#overlay{
-    position:absolute;
-    width:100%;
-    height:100%;
-    pointer-events:none;
-}
-
-#status{
-    color:white;
-    margin-top:6px;
-    font-size:13px;
-}
-
+body{margin:0;overflow:hidden;background:#000;color:#fff;font-family:Arial}
+#ui{position:absolute;left:10px;top:10px;z-index:20;background:rgba(0,0,0,.7);padding:10px;border-radius:8px}
+#videoPanel{position:absolute;right:10px;bottom:10px;width:320px;height:240px;border:2px solid white;z-index:30}
+#video,#overlay{position:absolute;width:100%;height:100%}
+button{padding:8px;margin-right:4px}
 </style>
 </head>
 <body>
-
 <div id="ui">
-
-<button id="calibrate">
-Calibrate
-</button>
-
-<button id="profile">
-Profilometry Mode
-</button>
-
-<div id="status">
-Loading OpenCV...
+<button id="calibrate">Calibrate</button>
+<button id="profile">Profilometry</button>
+<div id="status">Loading...</div>
 </div>
-
-</div>
-
 <div id="videoPanel">
-
-<video
-id="video"
-autoplay
-playsinline>
-</video>
-
+<video id="video" autoplay playsinline></video>
 <canvas id="overlay"></canvas>
-
 </div>
-
-<script async
-src="https://docs.opencv.org/4.x/opencv.js">
-</script>
 
 <script type="module">
+import * as THREE from 'https://cdn.jsdelivr.net/npm/three@0.163/build/three.module.js';
 
-import * as THREE from
-"https://cdn.jsdelivr.net/npm/three@0.163/build/three.module.js";
+const status=document.getElementById('status');
+const video=document.getElementById('video');
+const overlay=document.getElementById('overlay');
+const octx=overlay.getContext('2d');
 
-///////////////////////////////////////////////////////////////////////////
-// UI
-///////////////////////////////////////////////////////////////////////////
-
-const statusText =
-document.getElementById("status");
-
-const video =
-document.getElementById("video");
-
-const overlay =
-document.getElementById("overlay");
-
-const overlayCtx =
-overlay.getContext("2d");
-
-///////////////////////////////////////////////////////////////////////////
-// OPENCV READY
-///////////////////////////////////////////////////////////////////////////
-
-function waitForOpenCV()
-{
-    return new Promise(resolve =>
-    {
-        const check = () =>
-        {
-            if(window.cv && cv.Mat)
-            {
-                resolve();
-            }
-            else
-            {
-                requestAnimationFrame(check);
-            }
-        };
-
-        check();
-    });
+while(!(window.cv && cv.Mat)){
+  await new Promise(r=>setTimeout(r,100));
 }
+status.textContent='OpenCV Ready';
 
-await waitForOpenCV();
-
-statusText.innerHTML =
-"OpenCV loaded";
-
-///////////////////////////////////////////////////////////////////////////
-// CAMERA
-///////////////////////////////////////////////////////////////////////////
-
-const stream =
-await navigator.mediaDevices.getUserMedia({
-    video:{
-        facingMode:"environment"
-    }
-});
-
-video.srcObject = stream;
-
+const stream=await navigator.mediaDevices.getUserMedia({video:{facingMode:'environment'}});
+video.srcObject=stream;
 await video.play();
 
-///////////////////////////////////////////////////////////////////////////
-// HIDDEN PROCESSING CANVAS
-///////////////////////////////////////////////////////////////////////////
+const capCanvas=document.createElement('canvas');
+const capCtx=capCanvas.getContext('2d');
 
-const captureCanvas =
-document.createElement("canvas");
+const scene=new THREE.Scene();
+const camera=new THREE.PerspectiveCamera(60,innerWidth/innerHeight,0.01,100);
+camera.position.z=3;
+const renderer=new THREE.WebGLRenderer({antialias:true});
+renderer.setSize(innerWidth,innerHeight);
+document.body.appendChild(renderer.domElement);
 
-const captureCtx =
-captureCanvas.getContext("2d");
-
-///////////////////////////////////////////////////////////////////////////
-// THREE.JS
-///////////////////////////////////////////////////////////////////////////
-
-const scene = new THREE.Scene();
-
-scene.background =
-new THREE.Color(0x000000);
-
-const camera =
-new THREE.PerspectiveCamera(
-    60,
-    window.innerWidth/window.innerHeight,
-    0.01,
-    100
+const geometry=new THREE.BufferGeometry();
+const points=new THREE.Points(
+ geometry,
+ new THREE.PointsMaterial({size:0.02,color:0x00ffcc})
 );
+scene.add(points);
 
-camera.position.set(0,0,3);
+let calibrationDB=[];
+let profiling=false;
 
-const renderer =
-new THREE.WebGLRenderer({
-    antialias:true
-});
-
-renderer.setSize(
-    window.innerWidth,
-    window.innerHeight
-);
-
-document.body.appendChild(
-    renderer.domElement
-);
-
-///////////////////////////////////////////////////////////////////////////
-// POINT CLOUD
-///////////////////////////////////////////////////////////////////////////
-
-const geometry =
-new THREE.BufferGeometry();
-
-const material =
-new THREE.PointsMaterial({
-    color:0x00ffcc,
-    size:0.02
-});
-
-const cloud =
-new THREE.Points(
-    geometry,
-    material
-);
-
-scene.add(cloud);
-
-///////////////////////////////////////////////////////////////////////////
-// STATE
-///////////////////////////////////////////////////////////////////////////
-
-let calibrationDots = [];
-let profilometryMode = false;
-
-///////////////////////////////////////////////////////////////////////////
-// CAPTURE FRAME
-///////////////////////////////////////////////////////////////////////////
-
-function captureFrame()
-{
-    captureCanvas.width =
-        video.videoWidth;
-
-    captureCanvas.height =
-        video.videoHeight;
-
-    captureCtx.drawImage(
-        video,
-        0,
-        0
-    );
-
-    return captureCtx.getImageData(
-        0,
-        0,
-        captureCanvas.width,
-        captureCanvas.height
-    );
+function capture(){
+ capCanvas.width=video.videoWidth;
+ capCanvas.height=video.videoHeight;
+ capCtx.drawImage(video,0,0);
+ return capCtx.getImageData(0,0,capCanvas.width,capCanvas.height);
 }
 
-///////////////////////////////////////////////////////////////////////////
-// SUBPIXEL BLOB DETECTION
-///////////////////////////////////////////////////////////////////////////
-
-function detectDotsCV(imageData)
-{
-    let src =
-        cv.matFromImageData(
-            imageData
-        );
-
-    let gray =
-        new cv.Mat();
-
-    let blur =
-        new cv.Mat();
-
-    let thresh =
-        new cv.Mat();
-
-    cv.cvtColor(
-        src,
-        gray,
-        cv.COLOR_RGBA2GRAY
-    );
-
-    cv.GaussianBlur(
-        gray,
-        blur,
-        new cv.Size(5,5),
-        0
-    );
-
-    cv.adaptiveThreshold(
-        blur,
-        thresh,
-        255,
-        cv.ADAPTIVE_THRESH_GAUSSIAN_C,
-        cv.THRESH_BINARY,
-        35,
-        -5
-    );
-
-    let contours =
-        new cv.MatVector();
-
-    let hierarchy =
-        new cv.Mat();
-
-    cv.findContours(
-        thresh,
-        contours,
-        hierarchy,
-        cv.RETR_LIST,
-        cv.CHAIN_APPROX_SIMPLE
-    );
-
-    let dots = [];
-
-    for(let i=0;i<contours.size();i++)
-    {
-        let cnt =
-            contours.get(i);
-
-        const area =
-            cv.contourArea(cnt);
-
-        if(area < 5 || area > 500)
-        {
-            cnt.delete();
-            continue;
-        }
-
-        const m =
-            cv.moments(cnt);
-
-        if(m.m00 === 0)
-        {
-            cnt.delete();
-            continue;
-        }
-
-        let cx =
-            m.m10/m.m00;
-
-        let cy =
-            m.m01/m.m00;
-
-        dots.push({
-            x:cx,
-            y:cy
-        });
-
-        cnt.delete();
-    }
-
-    if(dots.length)
-    {
-        let corners =
-            new cv.Mat(
-                dots.length,
-                1,
-                cv.CV_32FC2
-            );
-
-        for(let i=0;i<dots.length;i++)
-        {
-            corners.data32F[
-                i*2
-            ] = dots[i].x;
-
-            corners.data32F[
-                i*2+1
-            ] = dots[i].y;
-        }
-
-        cv.cornerSubPix(
-            gray,
-            corners,
-            new cv.Size(5,5),
-            new cv.Size(-1,-1),
-            new cv.TermCriteria(
-                cv.TermCriteria_EPS +
-                cv.TermCriteria_MAX_ITER,
-                20,
-                0.01
-            )
-        );
-
-        for(let i=0;i<dots.length;i++)
-        {
-            dots[i].x =
-                corners.data32F[
-                i*2];
-
-            dots[i].y =
-                corners.data32F[
-                i*2+1];
-        }
-
-        corners.delete();
-    }
-
-    src.delete();
-    gray.delete();
-    blur.delete();
-    thresh.delete();
-    contours.delete();
-    hierarchy.delete();
-
-    return dots;
+function detectDotsCV(imageData){
+ const src=cv.matFromImageData(imageData);
+ const gray=new cv.Mat();
+ const blur=new cv.Mat();
+ const thresh=new cv.Mat();
+ cv.cvtColor(src,gray,cv.COLOR_RGBA2GRAY);
+ cv.GaussianBlur(gray,blur,new cv.Size(5,5),0);
+ cv.adaptiveThreshold(blur,thresh,255,cv.ADAPTIVE_THRESH_GAUSSIAN_C,cv.THRESH_BINARY,35,-5);
+ const labels=new cv.Mat();
+ const stats=new cv.Mat();
+ const centroids=new cv.Mat();
+ const n=cv.connectedComponentsWithStats(thresh,labels,stats,centroids,8,cv.CV_32S);
+ const dots=[];
+ for(let i=1;i<n;i++){
+  const area=stats.intAt(i,cv.CC_STAT_AREA);
+  if(area<5||area>500) continue;
+  dots.push({x:centroids.doubleAt(i,0),y:centroids.doubleAt(i,1)});
+ }
+ [src,gray,blur,thresh,labels,stats,centroids].forEach(m=>m.delete());
+ return dots;
 }
 
-///////////////////////////////////////////////////////////////////////////
-// DEBUG DISPLAY
-///////////////////////////////////////////////////////////////////////////
-
-function drawDots(dots)
-{
-    const w =
-        overlay.width =
-        overlay.clientWidth;
-
-    const h =
-        overlay.height =
-        overlay.clientHeight;
-
-    overlayCtx.clearRect(
-        0,0,w,h
-    );
-
-    const sx =
-        w/captureCanvas.width;
-
-    const sy =
-        h/captureCanvas.height;
-
-    overlayCtx.strokeStyle =
-        "lime";
-
-    overlayCtx.lineWidth = 2;
-
-    for(const d of dots)
-    {
-        overlayCtx.beginPath();
-
-        overlayCtx.arc(
-            d.x*sx,
-            d.y*sy,
-            4,
-            0,
-            Math.PI*2
-        );
-
-        overlayCtx.stroke();
-    }
+function createDescriptor(dot,dots,k=6){
+ const n=[];
+ for(const d of dots){
+  if(d===dot) continue;
+  const dx=d.x-dot.x, dy=d.y-dot.y;
+  n.push({dist:Math.hypot(dx,dy),angle:Math.atan2(dy,dx)});
+ }
+ n.sort((a,b)=>a.dist-b.dist);
+ const sel=n.slice(0,k);
+ if(sel.length===0) return [];
+ const d0=sel[0].dist;
+ return sel.map(v=>({dist:v.dist/d0,angle:v.angle}));
 }
 
-///////////////////////////////////////////////////////////////////////////
-// DEPTH MODEL
-///////////////////////////////////////////////////////////////////////////
-
-function estimateDepth(disparity)
-{
-    const baseline = 0.10;
-    const focal = 1200;
-
-    return (
-        baseline*focal
-    ) /
-    Math.max(
-        disparity,
-        1
-    );
+function buildDatabase(dots){
+ return dots.map((d,i)=>({id:i,x:d.x,y:d.y,descriptor:createDescriptor(d,dots)}));
 }
 
-///////////////////////////////////////////////////////////////////////////
-// POINT CLOUD
-///////////////////////////////////////////////////////////////////////////
-
-function buildPointCloud(currentDots)
-{
-    const positions = [];
-
-    const n =
-    Math.min(
-        calibrationDots.length,
-        currentDots.length
-    );
-
-    for(let i=0;i<n;i++)
-    {
-        const a =
-            calibrationDots[i];
-
-        const b =
-            currentDots[i];
-
-        const dx =
-            b.x-a.x;
-
-        const dy =
-            b.y-a.y;
-
-        const disparity =
-            Math.sqrt(
-                dx*dx +
-                dy*dy
-            );
-
-        const z =
-            estimateDepth(
-                disparity
-            );
-
-        const scale =
-            0.002;
-
-        positions.push(
-            (b.x -
-            captureCanvas.width/2)
-            * scale,
-
-            -(b.y -
-            captureCanvas.height/2)
-            * scale,
-
-            -z*0.01
-        );
-    }
-
-    geometry.setAttribute(
-        "position",
-
-        new THREE.Float32BufferAttribute(
-            positions,
-            3
-        )
-    );
-
-    geometry.computeBoundingSphere();
+function descriptorDistance(a,b){
+ const n=Math.min(a.length,b.length);
+ let s=0;
+ for(let i=0;i<n;i++){
+  s+=Math.abs(a[i].dist-b[i].dist);
+  let da=Math.abs(a[i].angle-b[i].angle);
+  da=Math.min(da,Math.PI*2-da);
+  s+=0.2*da;
+ }
+ return s;
 }
 
-///////////////////////////////////////////////////////////////////////////
-// BUTTONS
-///////////////////////////////////////////////////////////////////////////
+function matchDots(obs){
+ const matches=[];
+ for(const d of obs){
+  const desc=createDescriptor(d,obs);
+  let best=null,bestScore=1e9;
+  for(const ref of calibrationDB){
+   const sc=descriptorDistance(desc,ref.descriptor);
+   if(sc<bestScore){bestScore=sc;best=ref;}
+  }
+  if(best && bestScore<2){
+   matches.push({calibration:best,current:d});
+  }
+ }
+ return matches;
+}
 
-document
-.getElementById("calibrate")
-.onclick = () =>
-{
-    const frame =
-        captureFrame();
+function estimateDepth(disparity){
+ return (0.1*1200)/Math.max(disparity,1);
+}
 
-    calibrationDots =
-        detectDotsCV(
-            frame
-        );
+function rebuildCloud(current){
+ const matches=matchDots(current);
+ const pos=[];
+ for(const m of matches){
+  const dx=m.current.x-m.calibration.x;
+  const dy=m.current.y-m.calibration.y;
+  const disp=Math.hypot(dx,dy);
+  const z=estimateDepth(disp);
+  pos.push(
+   (m.current.x-capCanvas.width/2)*0.002,
+   -(m.current.y-capCanvas.height/2)*0.002,
+   -z*0.01
+  );
+ }
+ geometry.setAttribute('position',new THREE.Float32BufferAttribute(pos,3));
+ }
 
-    statusText.innerHTML =
-        "Calibration dots: " +
-        calibrationDots.length;
+function drawDots(dots){
+ overlay.width=overlay.clientWidth;
+ overlay.height=overlay.clientHeight;
+ octx.clearRect(0,0,overlay.width,overlay.height);
+ const sx=overlay.width/capCanvas.width;
+ const sy=overlay.height/capCanvas.height;
+ octx.strokeStyle='lime';
+ for(const d of dots){
+  octx.beginPath();
+  octx.arc(d.x*sx,d.y*sy,4,0,Math.PI*2);
+  octx.stroke();
+ }
+}
+
+document.getElementById('calibrate').onclick=()=>{
+ const dots=detectDotsCV(capture());
+ calibrationDB=buildDatabase(dots);
+ status.textContent=`Stored ${calibrationDB.length} descriptors`;
 };
 
-document
-.getElementById("profile")
-.onclick = () =>
-{
-    profilometryMode = true;
-};
+document.getElementById('profile').onclick=()=>profiling=true;
 
-///////////////////////////////////////////////////////////////////////////
-// ANIMATION
-///////////////////////////////////////////////////////////////////////////
-
-function animate()
-{
-    requestAnimationFrame(
-        animate
-    );
-
-    if(video.readyState >= 2)
-    {
-        const frame =
-            captureFrame();
-
-        const dots =
-            detectDotsCV(
-                frame
-            );
-
-        drawDots(dots);
-
-        if(profilometryMode)
-        {
-            buildPointCloud(
-                dots
-            );
-        }
-    }
-
-    cloud.rotation.y +=
-        0.003;
-
-    renderer.render(
-        scene,
-        camera
-    );
+function animate(){
+ requestAnimationFrame(animate);
+ if(video.readyState>=2){
+  const dots=detectDotsCV(capture());
+  drawDots(dots);
+  if(profiling && calibrationDB.length) rebuildCloud(dots);
+ }
+ points.rotation.y+=0.003;
+ renderer.render(scene,camera);
 }
-
 animate();
-
-///////////////////////////////////////////////////////////////////////////
-
-window.addEventListener(
-"resize",
-() =>
-{
-    camera.aspect =
-        window.innerWidth /
-        window.innerHeight;
-
-    camera.updateProjectionMatrix();
-
-    renderer.setSize(
-        window.innerWidth,
-        window.innerHeight
-    );
-}
-);
-
 </script>
 </body>
 </html>
