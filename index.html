@@ -1,0 +1,379 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+
+<title>Projector Profilometry</title>
+
+<style>
+body{
+    margin:0;
+    overflow:hidden;
+    font-family:sans-serif;
+    background:black;
+}
+
+#ui{
+    position:absolute;
+    top:10px;
+    left:10px;
+    z-index:100;
+}
+
+button{
+    padding:10px;
+    margin-right:5px;
+}
+
+#video{
+    position:absolute;
+    right:10px;
+    bottom:10px;
+    width:320px;
+    border:2px solid white;
+}
+</style>
+</head>
+
+<body>
+
+<div id="ui">
+    <button id="calibrate">Calibrate Pattern</button>
+    <button id="profile">Profilometry Mode</button>
+</div>
+
+<video id="video" autoplay playsinline></video>
+
+<script type="module">
+
+import * as THREE from
+'https://cdn.jsdelivr.net/npm/three@0.163/build/three.module.js';
+
+///////////////////////////////////////////////////////////////////////////
+// CAMERA
+///////////////////////////////////////////////////////////////////////////
+
+const video = document.getElementById("video");
+
+const stream =
+await navigator.mediaDevices.getUserMedia({
+    video:{
+        facingMode:"environment"
+    }
+});
+
+video.srcObject = stream;
+
+///////////////////////////////////////////////////////////////////////////
+// OFFSCREEN
+///////////////////////////////////////////////////////////////////////////
+
+const canvas = document.createElement("canvas");
+const ctx = canvas.getContext("2d");
+
+///////////////////////////////////////////////////////////////////////////
+// THREE.JS
+///////////////////////////////////////////////////////////////////////////
+
+const scene = new THREE.Scene();
+
+scene.background=new THREE.Color(0x000000);
+
+const camera = new THREE.PerspectiveCamera(
+    60,
+    innerWidth/innerHeight,
+    0.01,
+    100
+);
+
+camera.position.set(0,0,3);
+
+const renderer=new THREE.WebGLRenderer({
+    antialias:true
+});
+
+renderer.setSize(innerWidth,innerHeight);
+
+document.body.appendChild(renderer.domElement);
+
+///////////////////////////////////////////////////////////////////////////
+// POINT CLOUD
+///////////////////////////////////////////////////////////////////////////
+
+const geometry=new THREE.BufferGeometry();
+
+let positions = [];
+
+geometry.setAttribute(
+    'position',
+    new THREE.Float32BufferAttribute([],3)
+);
+
+const material =
+new THREE.PointsMaterial({
+    color:0x00ffcc,
+    size:0.02
+});
+
+const cloud =
+new THREE.Points(geometry,material);
+
+scene.add(cloud);
+
+///////////////////////////////////////////////////////////////////////////
+// PATTERN STORAGE
+///////////////////////////////////////////////////////////////////////////
+
+let calibrationDots = [];
+let profilometry = false;
+
+///////////////////////////////////////////////////////////////////////////
+// DOT DETECTOR
+///////////////////////////////////////////////////////////////////////////
+
+function detectDots(imageData,w,h)
+{
+    const pts=[];
+
+    const data=imageData.data;
+
+    for(let y=2;y<h-2;y+=2)
+    {
+        for(let x=2;x<w-2;x+=2)
+        {
+            const i=(y*w+x)*4;
+
+            const r=data[i];
+            const g=data[i+1];
+            const b=data[i+2];
+
+            const brightness=(r+g+b)/3;
+
+            if(brightness>220)
+            {
+                pts.push({
+                    x:x,
+                    y:y
+                });
+            }
+        }
+    }
+
+    return cluster(pts);
+}
+
+///////////////////////////////////////////////////////////////////////////
+
+function cluster(points)
+{
+    const out=[];
+    const used=new Array(points.length).fill(false);
+
+    for(let i=0;i<points.length;i++)
+    {
+        if(used[i]) continue;
+
+        let sx=0;
+        let sy=0;
+        let count=0;
+
+        for(let j=i;j<points.length;j++)
+        {
+            if(used[j]) continue;
+
+            const dx=
+                points[i].x-points[j].x;
+
+            const dy=
+                points[i].y-points[j].y;
+
+            if(dx*dx+dy*dy<100)
+            {
+                sx+=points[j].x;
+                sy+=points[j].y;
+                count++;
+
+                used[j]=true;
+            }
+        }
+
+        if(count>0)
+        {
+            out.push({
+                x:sx/count,
+                y:sy/count
+            });
+        }
+    }
+
+    return out;
+}
+
+///////////////////////////////////////////////////////////////////////////
+// CALIBRATION
+///////////////////////////////////////////////////////////////////////////
+
+document.getElementById("calibrate").onclick=
+function()
+{
+    capture();
+
+    calibrationDots =
+        detectDots(
+            ctx.getImageData(
+                0,0,
+                canvas.width,
+                canvas.height
+            ),
+            canvas.width,
+            canvas.height
+        );
+
+    console.log(
+        "learned dots",
+        calibrationDots.length
+    );
+};
+
+///////////////////////////////////////////////////////////////////////////
+// PROFILOMETRY
+///////////////////////////////////////////////////////////////////////////
+
+document.getElementById("profile").onclick=
+function()
+{
+    profilometry=true;
+};
+
+///////////////////////////////////////////////////////////////////////////
+
+function capture()
+{
+    canvas.width=video.videoWidth;
+    canvas.height=video.videoHeight;
+
+    ctx.drawImage(
+        video,
+        0,
+        0
+    );
+}
+
+///////////////////////////////////////////////////////////////////////////
+
+function estimateDepth(displacement)
+{
+    const baseline = 0.10;
+    const focal = 800;
+
+    return (baseline*focal)/
+           Math.max(displacement,1);
+}
+
+///////////////////////////////////////////////////////////////////////////
+
+function buildPointCloud(currentDots)
+{
+    positions=[];
+
+    const n=
+        Math.min(
+            calibrationDots.length,
+            currentDots.length
+        );
+
+    for(let i=0;i<n;i++)
+    {
+        const d0=
+            calibrationDots[i];
+
+        const d1=
+            currentDots[i];
+
+        const dx=d1.x-d0.x;
+        const dy=d1.y-d0.y;
+
+        const disparity=
+            Math.sqrt(dx*dx+dy*dy);
+
+        const z=
+            estimateDepth(disparity);
+
+        const scale=0.002;
+
+        positions.push(
+            (d1.x-canvas.width/2)*scale,
+            -(d1.y-canvas.height/2)*scale,
+            -z*0.01
+        );
+    }
+
+    geometry.setAttribute(
+        'position',
+        new THREE.Float32BufferAttribute(
+            positions,
+            3
+        )
+    );
+
+    geometry.computeBoundingSphere();
+}
+
+///////////////////////////////////////////////////////////////////////////
+
+function animate()
+{
+    requestAnimationFrame(animate);
+
+    if(video.readyState>=2)
+    {
+        capture();
+
+        if(profilometry)
+        {
+            const dots=
+                detectDots(
+                    ctx.getImageData(
+                        0,
+                        0,
+                        canvas.width,
+                        canvas.height
+                    ),
+                    canvas.width,
+                    canvas.height
+                );
+
+            buildPointCloud(dots);
+        }
+    }
+
+    cloud.rotation.y+=0.003;
+
+    renderer.render(
+        scene,
+        camera
+    );
+}
+
+animate();
+
+///////////////////////////////////////////////////////////////////////////
+
+window.addEventListener(
+    'resize',
+    ()=>{
+        camera.aspect=
+            innerWidth/innerHeight;
+
+        camera.updateProjectionMatrix();
+
+        renderer.setSize(
+            innerWidth,
+            innerHeight
+        );
+    }
+);
+
+</script>
+</body>
+</html>
