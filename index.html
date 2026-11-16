@@ -1,16 +1,18 @@
 <!DOCTYPE html>
-<html>
+<html lang="en">
 <head>
 <meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
 
 <title>Projector Profilometry</title>
 
 <style>
+
 body{
     margin:0;
     overflow:hidden;
-    font-family:sans-serif;
     background:black;
+    font-family:Arial,sans-serif;
 }
 
 #ui{
@@ -18,42 +20,135 @@ body{
     top:10px;
     left:10px;
     z-index:100;
+    background:rgba(0,0,0,0.6);
+    padding:10px;
+    border-radius:8px;
 }
 
 button{
-    padding:10px;
-    margin-right:5px;
+    padding:8px 12px;
+    margin-right:6px;
 }
 
-#video{
+#videoPanel{
     position:absolute;
     right:10px;
     bottom:10px;
     width:320px;
+    height:240px;
+    z-index:100;
     border:2px solid white;
 }
+
+#video{
+    position:absolute;
+    width:100%;
+    height:100%;
+    object-fit:cover;
+}
+
+#overlay{
+    position:absolute;
+    width:100%;
+    height:100%;
+    pointer-events:none;
+}
+
+#status{
+    color:white;
+    margin-top:6px;
+    font-size:13px;
+}
+
 </style>
 </head>
-
 <body>
 
 <div id="ui">
-    <button id="calibrate">Calibrate Pattern</button>
-    <button id="profile">Profilometry Mode</button>
+
+<button id="calibrate">
+Calibrate
+</button>
+
+<button id="profile">
+Profilometry Mode
+</button>
+
+<div id="status">
+Loading OpenCV...
 </div>
 
-<video id="video" autoplay playsinline></video>
+</div>
+
+<div id="videoPanel">
+
+<video
+id="video"
+autoplay
+playsinline>
+</video>
+
+<canvas id="overlay"></canvas>
+
+</div>
+
+<script async
+src="https://docs.opencv.org/4.x/opencv.js">
+</script>
 
 <script type="module">
 
 import * as THREE from
-'https://cdn.jsdelivr.net/npm/three@0.163/build/three.module.js';
+"https://cdn.jsdelivr.net/npm/three@0.163/build/three.module.js";
+
+///////////////////////////////////////////////////////////////////////////
+// UI
+///////////////////////////////////////////////////////////////////////////
+
+const statusText =
+document.getElementById("status");
+
+const video =
+document.getElementById("video");
+
+const overlay =
+document.getElementById("overlay");
+
+const overlayCtx =
+overlay.getContext("2d");
+
+///////////////////////////////////////////////////////////////////////////
+// OPENCV READY
+///////////////////////////////////////////////////////////////////////////
+
+function waitForOpenCV()
+{
+    return new Promise(resolve =>
+    {
+        const check = () =>
+        {
+            if(window.cv && cv.Mat)
+            {
+                resolve();
+            }
+            else
+            {
+                requestAnimationFrame(check);
+            }
+        };
+
+        check();
+    });
+}
+
+await waitForOpenCV();
+
+statusText.innerHTML =
+"OpenCV loaded";
 
 ///////////////////////////////////////////////////////////////////////////
 // CAMERA
 ///////////////////////////////////////////////////////////////////////////
-
-const video = document.getElementById("video");
 
 const stream =
 await navigator.mediaDevices.getUserMedia({
@@ -64,12 +159,17 @@ await navigator.mediaDevices.getUserMedia({
 
 video.srcObject = stream;
 
+await video.play();
+
 ///////////////////////////////////////////////////////////////////////////
-// OFFSCREEN
+// HIDDEN PROCESSING CANVAS
 ///////////////////////////////////////////////////////////////////////////
 
-const canvas = document.createElement("canvas");
-const ctx = canvas.getContext("2d");
+const captureCanvas =
+document.createElement("canvas");
+
+const captureCtx =
+captureCanvas.getContext("2d");
 
 ///////////////////////////////////////////////////////////////////////////
 // THREE.JS
@@ -77,37 +177,39 @@ const ctx = canvas.getContext("2d");
 
 const scene = new THREE.Scene();
 
-scene.background=new THREE.Color(0x000000);
+scene.background =
+new THREE.Color(0x000000);
 
-const camera = new THREE.PerspectiveCamera(
+const camera =
+new THREE.PerspectiveCamera(
     60,
-    innerWidth/innerHeight,
+    window.innerWidth/window.innerHeight,
     0.01,
     100
 );
 
 camera.position.set(0,0,3);
 
-const renderer=new THREE.WebGLRenderer({
+const renderer =
+new THREE.WebGLRenderer({
     antialias:true
 });
 
-renderer.setSize(innerWidth,innerHeight);
+renderer.setSize(
+    window.innerWidth,
+    window.innerHeight
+);
 
-document.body.appendChild(renderer.domElement);
+document.body.appendChild(
+    renderer.domElement
+);
 
 ///////////////////////////////////////////////////////////////////////////
 // POINT CLOUD
 ///////////////////////////////////////////////////////////////////////////
 
-const geometry=new THREE.BufferGeometry();
-
-let positions = [];
-
-geometry.setAttribute(
-    'position',
-    new THREE.Float32BufferAttribute([],3)
-);
+const geometry =
+new THREE.BufferGeometry();
 
 const material =
 new THREE.PointsMaterial({
@@ -116,200 +218,320 @@ new THREE.PointsMaterial({
 });
 
 const cloud =
-new THREE.Points(geometry,material);
+new THREE.Points(
+    geometry,
+    material
+);
 
 scene.add(cloud);
 
 ///////////////////////////////////////////////////////////////////////////
-// PATTERN STORAGE
+// STATE
 ///////////////////////////////////////////////////////////////////////////
 
 let calibrationDots = [];
-let profilometry = false;
+let profilometryMode = false;
 
 ///////////////////////////////////////////////////////////////////////////
-// DOT DETECTOR
+// CAPTURE FRAME
 ///////////////////////////////////////////////////////////////////////////
 
-function detectDots(imageData,w,h)
+function captureFrame()
 {
-    const pts=[];
+    captureCanvas.width =
+        video.videoWidth;
 
-    const data=imageData.data;
+    captureCanvas.height =
+        video.videoHeight;
 
-    for(let y=2;y<h-2;y+=2)
-    {
-        for(let x=2;x<w-2;x+=2)
-        {
-            const i=(y*w+x)*4;
-
-            const r=data[i];
-            const g=data[i+1];
-            const b=data[i+2];
-
-            const brightness=(r+g+b)/3;
-
-            if(brightness>220)
-            {
-                pts.push({
-                    x:x,
-                    y:y
-                });
-            }
-        }
-    }
-
-    return cluster(pts);
-}
-
-///////////////////////////////////////////////////////////////////////////
-
-function cluster(points)
-{
-    const out=[];
-    const used=new Array(points.length).fill(false);
-
-    for(let i=0;i<points.length;i++)
-    {
-        if(used[i]) continue;
-
-        let sx=0;
-        let sy=0;
-        let count=0;
-
-        for(let j=i;j<points.length;j++)
-        {
-            if(used[j]) continue;
-
-            const dx=
-                points[i].x-points[j].x;
-
-            const dy=
-                points[i].y-points[j].y;
-
-            if(dx*dx+dy*dy<100)
-            {
-                sx+=points[j].x;
-                sy+=points[j].y;
-                count++;
-
-                used[j]=true;
-            }
-        }
-
-        if(count>0)
-        {
-            out.push({
-                x:sx/count,
-                y:sy/count
-            });
-        }
-    }
-
-    return out;
-}
-
-///////////////////////////////////////////////////////////////////////////
-// CALIBRATION
-///////////////////////////////////////////////////////////////////////////
-
-document.getElementById("calibrate").onclick=
-function()
-{
-    capture();
-
-    calibrationDots =
-        detectDots(
-            ctx.getImageData(
-                0,0,
-                canvas.width,
-                canvas.height
-            ),
-            canvas.width,
-            canvas.height
-        );
-
-    console.log(
-        "learned dots",
-        calibrationDots.length
-    );
-};
-
-///////////////////////////////////////////////////////////////////////////
-// PROFILOMETRY
-///////////////////////////////////////////////////////////////////////////
-
-document.getElementById("profile").onclick=
-function()
-{
-    profilometry=true;
-};
-
-///////////////////////////////////////////////////////////////////////////
-
-function capture()
-{
-    canvas.width=video.videoWidth;
-    canvas.height=video.videoHeight;
-
-    ctx.drawImage(
+    captureCtx.drawImage(
         video,
         0,
         0
     );
+
+    return captureCtx.getImageData(
+        0,
+        0,
+        captureCanvas.width,
+        captureCanvas.height
+    );
 }
 
 ///////////////////////////////////////////////////////////////////////////
+// SUBPIXEL BLOB DETECTION
+///////////////////////////////////////////////////////////////////////////
 
-function estimateDepth(displacement)
+function detectDotsCV(imageData)
 {
-    const baseline = 0.10;
-    const focal = 800;
+    let src =
+        cv.matFromImageData(
+            imageData
+        );
 
-    return (baseline*focal)/
-           Math.max(displacement,1);
+    let gray =
+        new cv.Mat();
+
+    let blur =
+        new cv.Mat();
+
+    let thresh =
+        new cv.Mat();
+
+    cv.cvtColor(
+        src,
+        gray,
+        cv.COLOR_RGBA2GRAY
+    );
+
+    cv.GaussianBlur(
+        gray,
+        blur,
+        new cv.Size(5,5),
+        0
+    );
+
+    cv.adaptiveThreshold(
+        blur,
+        thresh,
+        255,
+        cv.ADAPTIVE_THRESH_GAUSSIAN_C,
+        cv.THRESH_BINARY,
+        35,
+        -5
+    );
+
+    let contours =
+        new cv.MatVector();
+
+    let hierarchy =
+        new cv.Mat();
+
+    cv.findContours(
+        thresh,
+        contours,
+        hierarchy,
+        cv.RETR_LIST,
+        cv.CHAIN_APPROX_SIMPLE
+    );
+
+    let dots = [];
+
+    for(let i=0;i<contours.size();i++)
+    {
+        let cnt =
+            contours.get(i);
+
+        const area =
+            cv.contourArea(cnt);
+
+        if(area < 5 || area > 500)
+        {
+            cnt.delete();
+            continue;
+        }
+
+        const m =
+            cv.moments(cnt);
+
+        if(m.m00 === 0)
+        {
+            cnt.delete();
+            continue;
+        }
+
+        let cx =
+            m.m10/m.m00;
+
+        let cy =
+            m.m01/m.m00;
+
+        dots.push({
+            x:cx,
+            y:cy
+        });
+
+        cnt.delete();
+    }
+
+    if(dots.length)
+    {
+        let corners =
+            new cv.Mat(
+                dots.length,
+                1,
+                cv.CV_32FC2
+            );
+
+        for(let i=0;i<dots.length;i++)
+        {
+            corners.data32F[
+                i*2
+            ] = dots[i].x;
+
+            corners.data32F[
+                i*2+1
+            ] = dots[i].y;
+        }
+
+        cv.cornerSubPix(
+            gray,
+            corners,
+            new cv.Size(5,5),
+            new cv.Size(-1,-1),
+            new cv.TermCriteria(
+                cv.TermCriteria_EPS +
+                cv.TermCriteria_MAX_ITER,
+                20,
+                0.01
+            )
+        );
+
+        for(let i=0;i<dots.length;i++)
+        {
+            dots[i].x =
+                corners.data32F[
+                i*2];
+
+            dots[i].y =
+                corners.data32F[
+                i*2+1];
+        }
+
+        corners.delete();
+    }
+
+    src.delete();
+    gray.delete();
+    blur.delete();
+    thresh.delete();
+    contours.delete();
+    hierarchy.delete();
+
+    return dots;
 }
 
+///////////////////////////////////////////////////////////////////////////
+// DEBUG DISPLAY
+///////////////////////////////////////////////////////////////////////////
+
+function drawDots(dots)
+{
+    const w =
+        overlay.width =
+        overlay.clientWidth;
+
+    const h =
+        overlay.height =
+        overlay.clientHeight;
+
+    overlayCtx.clearRect(
+        0,0,w,h
+    );
+
+    const sx =
+        w/captureCanvas.width;
+
+    const sy =
+        h/captureCanvas.height;
+
+    overlayCtx.strokeStyle =
+        "lime";
+
+    overlayCtx.lineWidth = 2;
+
+    for(const d of dots)
+    {
+        overlayCtx.beginPath();
+
+        overlayCtx.arc(
+            d.x*sx,
+            d.y*sy,
+            4,
+            0,
+            Math.PI*2
+        );
+
+        overlayCtx.stroke();
+    }
+}
+
+///////////////////////////////////////////////////////////////////////////
+// DEPTH MODEL
+///////////////////////////////////////////////////////////////////////////
+
+function estimateDepth(disparity)
+{
+    const baseline = 0.10;
+    const focal = 1200;
+
+    return (
+        baseline*focal
+    ) /
+    Math.max(
+        disparity,
+        1
+    );
+}
+
+///////////////////////////////////////////////////////////////////////////
+// POINT CLOUD
 ///////////////////////////////////////////////////////////////////////////
 
 function buildPointCloud(currentDots)
 {
-    positions=[];
+    const positions = [];
 
-    const n=
-        Math.min(
-            calibrationDots.length,
-            currentDots.length
-        );
+    const n =
+    Math.min(
+        calibrationDots.length,
+        currentDots.length
+    );
 
     for(let i=0;i<n;i++)
     {
-        const d0=
+        const a =
             calibrationDots[i];
 
-        const d1=
+        const b =
             currentDots[i];
 
-        const dx=d1.x-d0.x;
-        const dy=d1.y-d0.y;
+        const dx =
+            b.x-a.x;
 
-        const disparity=
-            Math.sqrt(dx*dx+dy*dy);
+        const dy =
+            b.y-a.y;
 
-        const z=
-            estimateDepth(disparity);
+        const disparity =
+            Math.sqrt(
+                dx*dx +
+                dy*dy
+            );
 
-        const scale=0.002;
+        const z =
+            estimateDepth(
+                disparity
+            );
+
+        const scale =
+            0.002;
 
         positions.push(
-            (d1.x-canvas.width/2)*scale,
-            -(d1.y-canvas.height/2)*scale,
+            (b.x -
+            captureCanvas.width/2)
+            * scale,
+
+            -(b.y -
+            captureCanvas.height/2)
+            * scale,
+
             -z*0.01
         );
     }
 
     geometry.setAttribute(
-        'position',
+        "position",
+
         new THREE.Float32BufferAttribute(
             positions,
             3
@@ -320,34 +542,65 @@ function buildPointCloud(currentDots)
 }
 
 ///////////////////////////////////////////////////////////////////////////
+// BUTTONS
+///////////////////////////////////////////////////////////////////////////
+
+document
+.getElementById("calibrate")
+.onclick = () =>
+{
+    const frame =
+        captureFrame();
+
+    calibrationDots =
+        detectDotsCV(
+            frame
+        );
+
+    statusText.innerHTML =
+        "Calibration dots: " +
+        calibrationDots.length;
+};
+
+document
+.getElementById("profile")
+.onclick = () =>
+{
+    profilometryMode = true;
+};
+
+///////////////////////////////////////////////////////////////////////////
+// ANIMATION
+///////////////////////////////////////////////////////////////////////////
 
 function animate()
 {
-    requestAnimationFrame(animate);
+    requestAnimationFrame(
+        animate
+    );
 
-    if(video.readyState>=2)
+    if(video.readyState >= 2)
     {
-        capture();
+        const frame =
+            captureFrame();
 
-        if(profilometry)
+        const dots =
+            detectDotsCV(
+                frame
+            );
+
+        drawDots(dots);
+
+        if(profilometryMode)
         {
-            const dots=
-                detectDots(
-                    ctx.getImageData(
-                        0,
-                        0,
-                        canvas.width,
-                        canvas.height
-                    ),
-                    canvas.width,
-                    canvas.height
-                );
-
-            buildPointCloud(dots);
+            buildPointCloud(
+                dots
+            );
         }
     }
 
-    cloud.rotation.y+=0.003;
+    cloud.rotation.y +=
+        0.003;
 
     renderer.render(
         scene,
@@ -360,18 +613,20 @@ animate();
 ///////////////////////////////////////////////////////////////////////////
 
 window.addEventListener(
-    'resize',
-    ()=>{
-        camera.aspect=
-            innerWidth/innerHeight;
+"resize",
+() =>
+{
+    camera.aspect =
+        window.innerWidth /
+        window.innerHeight;
 
-        camera.updateProjectionMatrix();
+    camera.updateProjectionMatrix();
 
-        renderer.setSize(
-            innerWidth,
-            innerHeight
-        );
-    }
+    renderer.setSize(
+        window.innerWidth,
+        window.innerHeight
+    );
+}
 );
 
 </script>
